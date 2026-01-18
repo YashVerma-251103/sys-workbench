@@ -1,189 +1,241 @@
-# Universal installer & alias injectorimport os
+import os
 import sys
 import shutil
 import subprocess
 import platform
+import json
+from pathlib import Path
 
 # --- Configuration ---
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONTEXT_DIR = os.path.join(REPO_ROOT, "contexts")
 CONFIG_FILE = os.path.join(REPO_ROOT, "config", "aider.conf.yml")
+ENV_NAME = "sys-workbench-safe"
 
-# Mapping short keywords to file lists
-DOMAIN_MAP = {
-    "gpu": ["gpu_builder.md", "gpu_optim.md"],
-    "net": ["net_kernel.md"],
-    "ml": ["ml_systems.md"],
-    "soft": ["soft_arch.md"]
+# --- Visuals ---
+COLORS = {
+    "HEADER": "\033[95m", "BLUE": "\033[94m", "CYAN": "\033[96m",
+    "GREEN": "\033[92m", "WARN": "\033[93m", "FAIL": "\033[91m",
+    "END": "\033[0m", "BOLD": "\033[1m"
 }
 
-def print_status(msg, status="INFO"):
-    print(f"[{status}] {msg}")
+def log(msg, type="INFO"):
+    prefix = {
+        "INFO": f"{COLORS['BLUE']}[INFO]{COLORS['END']}",
+        "SUCCESS": f"{COLORS['GREEN']}[SUCCESS]{COLORS['END']}",
+        "WARN": f"{COLORS['WARN']}[WARN]{COLORS['END']}",
+        "ERROR": f"{COLORS['FAIL']}[ERROR]{COLORS['END']}",
+        "ACTION": f"{COLORS['CYAN']}[ACTION]{COLORS['END']}",
+    }
+    print(f"{prefix.get(type, '[?]')} {msg}")
 
-def install_aider_pipx():
-    """Installs pipx and aider if not present."""
-    if not shutil.which("pipx"):
-        print_status("pipx not found. Attempting to install...", "WARN")
-        # Crude attempt to install pipx, user might need to do this manually on some systems
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "pipx"])
-            subprocess.check_call([sys.executable, "-m", "pipx", "ensurepath"])
-        except subprocess.CalledProcessError:
-            print_status("Failed to install pipx. Please install it manually.", "ERROR")
-            sys.exit(1)
-    
-    if not shutil.which("aider"):
-        print_status("Installing aider-chat via pipx...", "ACTION")
-        subprocess.check_call(["pipx", "install", "aider-chat"])
-    else:
-        print_status("Aider is already installed.", "OK")
+def ask_user(question, default="yes"):
+    """Asks the user for permission."""
+    valid = {"yes": True, "y": True, "ye": True, "no": False, "n": False}
+    prompt = " [Y/n] " if default == "yes" else " [y/N] "
+    while True:
+        sys.stdout.write(f"{COLORS['WARN']}{question}{prompt}{COLORS['END']}")
+        choice = input().lower().strip()
+        if choice == "": return True if default == "yes" else False
+        if choice in valid: return valid[choice]
 
-def get_shell_config():
-    """Determines the shell config file and syntax based on OS."""
-    system = platform.system()
+def run_cmd(cmd, check=True):
+    print(f"{COLORS['BOLD']}> {' '.join(cmd)}{COLORS['END']}")
+    return subprocess.run(cmd, check=check, text=True)
+
+# --- Step 1: Python Environment ---
+def get_conda_path():
+    return shutil.which("conda")
+
+def setup_python_env():
+    log("Checking Python compatibility...", "INFO")
     
-    if system == "Windows":
-        # PowerShell Profile
-        try:
-            profile = subprocess.check_output(["powershell", "-NoProfile", "echo $PROFILE"], text=True).strip()
-            return "powershell", profile
-        except:
-            return "powershell", None # Handle error gracefully
-            
+    if os.environ.get("CONDA_DEFAULT_ENV") == ENV_NAME:
+        return sys.executable
+
+    major, minor = sys.version_info[:2]
+    is_windows = platform.system() == "Windows"
+    conda_exe = get_conda_path()
+    
+    if not conda_exe:
+        return sys.executable
+
+    # Check for existing env
+    try:
+        envs_json = subprocess.check_output([conda_exe, "env", "list", "--json"], text=True)
+        env_paths = json.loads(envs_json).get("envs", [])
+        target_path = next((p for p in env_paths if os.path.basename(os.path.normpath(p)) == ENV_NAME), None)
+    except:
+        target_path = None
+
+    if target_path:
+        log(f"Found existing environment: {target_path}", "SUCCESS")
     else:
-        # Linux/WSL (Bash/Zsh)
-        shell = os.environ.get("SHELL", "/bin/bash")
-        if "zsh" in shell:
-            return "zsh", os.path.expanduser("~/.zshrc")
+        if ask_user(f"Create isolated environment '{ENV_NAME}' (Recommended)?"):
+            run_cmd([conda_exe, "create", "-n", ENV_NAME, "python=3.11", "-y"])
+            # Re-fetch path
+            envs_json = subprocess.check_output([conda_exe, "env", "list", "--json"], text=True)
+            env_paths = json.loads(envs_json).get("envs", [])
+            target_path = next((p for p in env_paths if os.path.basename(os.path.normpath(p)) == ENV_NAME), None)
         else:
-            return "bash", os.path.expanduser("~/.bashrc")
+            log("Using system python (Not recommended for Windows).", "WARN")
+            return sys.executable
 
-def generate_bash_function():
-    """Generates the Bash/Zsh function string."""
-    # We embed the Python logic directly into the alias to resolve paths dynamically
-    # but for speed, we will generate a shell function that calls this script or constructs the command.
-    # To keep it simple and fast, we will write a Shell function that maps the keys.
-    
-    # We hardcode the paths in the shell function for the specific machine this is installed on.
-    
-    func_body = f"""
-# --- Sys-Workbench Mix ---
-sys-mix() {{
-    local cmd="aider --config \\"{CONFIG_FILE}\\""
-    local has_args=false
+    if is_windows:
+        return os.path.join(target_path, "python.exe")
+    else:
+        return os.path.join(target_path, "bin", "python")
 
-    for arg in "$@"; do
-        case "$arg" in
-"""
-    for key, files in DOMAIN_MAP.items():
-        files_paths = [os.path.join(CONTEXT_DIR, f) for f in files]
-        # --read adds the file to chat context
-        read_flags = " ".join([f'--read "{p}"' for p in files_paths])
-        func_body += f"""            "{key}")
-                cmd="$cmd {read_flags}"
-                has_args=true
-                ;;
-"""
-    
-    func_body += """            *)
-                echo "Unknown domain: $arg"
-                echo "Available: gpu, net, ml, soft"
-                return 1
-                ;;
-        esac
-    done
+# --- Step 2: Install Tools ---
+def install_pipx():
+    try:
+        subprocess.check_call([sys.executable, "-m", "pipx", "--version"], stdout=subprocess.DEVNULL)
+    except:
+        log("Pipx not found.", "WARN")
+        if ask_user("Install pipx now?"):
+            run_cmd([sys.executable, "-m", "pip", "install", "--user", "pipx"])
 
-    if [ "$has_args" = true ]; then
-        echo "Starting Sys-Workbench with: $@"
-        eval "$cmd"
-    else
-        echo "Usage: sys-mix [gpu|net|ml|soft] ..."
-    fi
-}
-"""
-    return func_body
+def install_aider(target_python):
+    try:
+        res = subprocess.run([sys.executable, "-m", "pipx", "list"], capture_output=True, text=True)
+        if "aider-chat" in res.stdout:
+            log("Aider is already installed.", "SUCCESS")
+            return
+    except: pass
 
-def generate_powershell_function():
-    """Generates the PowerShell function string."""
+    if ask_user(f"Install Aider using {os.path.basename(target_python)}?"):
+        run_cmd([sys.executable, "-m", "pipx", "install", "aider-chat", "--python", target_python, "--force"])
+
+# --- Step 3: Find Executable ---
+def find_absolute_aider_path():
+    log("Locating aider executable...", "INFO")
+    candidates = [
+        os.path.join(os.path.expanduser("~"), ".local", "bin", "aider.exe"),
+        os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "Python", "Scripts", "aider.exe"),
+        os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "Python", f"Python{sys.version_info.major}{sys.version_info.minor}", "Scripts", "aider.exe")
+    ]
     
-    func_body = f"""
+    # Check candidates
+    for path in candidates:
+        if os.path.exists(path):
+            log(f"Found Executable: {path}", "SUCCESS")
+            return path
+            
+    which = shutil.which("aider")
+    if which: return which
+    return None
+
+# --- Step 4: Profile Injection ---
+def generate_powershell_function(exe_path):
+    return f"""
 # --- Sys-Workbench Mix ---
 function sys-mix {{
     param(
         [Parameter(ValueFromRemainingArguments=$true)]
         [String[]]$Domains
     )
-
-    $aiderCmd = "aider --config '{CONFIG_FILE}'"
+    $aiderExe = "{exe_path}"
+    $aiderCmd = "& '$aiderExe' --config '{CONFIG_FILE}'"
     $hasArgs = $false
 
     foreach ($domain in $Domains) {{
         switch ($domain) {{
-"""
-    for key, files in DOMAIN_MAP.items():
-        files_paths = [os.path.join(CONTEXT_DIR, f) for f in files]
-        read_flags = " ".join([f"--read '{p}'" for p in files_paths])
-        func_body += f"""            "{key}" {{
-                $aiderCmd += " {read_flags}"
-                $hasArgs = $true
-            }}
-"""
+            {_get_ps_cases()}
+            Default {{ Write-Host "Unknown: $domain"; return }}
+        }}
+    }}
 
-    func_body += """            Default {
-                Write-Host "Unknown domain: $domain" -ForegroundColor Red
-                Write-Host "Available: gpu, net, ml, soft"
-                return
-            }
-        }
-    }
-
-    if ($hasArgs) {
+    if ($hasArgs) {{
         Write-Host "Starting Sys-Workbench..." -ForegroundColor Green
         Invoke-Expression $aiderCmd
-    } else {
-        Write-Host "Usage: sys-mix [gpu|net|ml|soft] ..."
-    }
+    }} else {{
+        Write-Host "Usage: sys-mix [gpu|net|ml|soft]"
+    }}
 }}
 """
-    return func_body
 
-def install_alias():
-    shell_type, config_path = get_shell_config()
-    
-    if not config_path or not os.path.exists(os.path.dirname(config_path)):
-        # For Windows, directory might not exist
-        if shell_type == "powershell":
-             os.makedirs(os.path.dirname(config_path), exist_ok=True)
-             if not os.path.exists(config_path):
-                 with open(config_path, 'w') as f: f.write("")
-        else:
-            print_status(f"Could not locate shell config file: {config_path}", "ERROR")
-            return
+def generate_bash_function(exe_path):
+    # For WSL/Linux
+    return f"""
+# --- Sys-Workbench Mix ---
+sys-mix() {{
+    local cmd="'{exe_path}' --config \\"{CONFIG_FILE}\\""
+    local has_args=false
+    for arg in "$@"; do
+        case "$arg" in
+            {_get_bash_cases()}
+            *) echo "Unknown domain: $arg"; return 1 ;;
+        esac
+    done
+    if [ "$has_args" = true ]; then
+        echo "Starting Sys-Workbench..."; eval "$cmd"
+    else
+        echo "Usage: sys-mix [gpu|net|ml|soft]"
+    fi
+}}
+"""
 
-    print_status(f"Detected {shell_type}. Injecting 'sys-mix' into {config_path}...", "ACTION")
+def _get_ps_cases():
+    cases = ""
+    for key, files in {
+        "gpu": ["gpu_builder.md", "gpu_optim.md"],
+        "net": ["net_kernel.md"],
+        "ml": ["ml_systems.md"],
+        "soft": ["soft_arch.md"]
+    }.items():
+        paths = [os.path.join(CONTEXT_DIR, f) for f in files]
+        flags = " ".join([f"--read '{p}'" for p in paths])
+        cases += f'"{key}" {{ $aiderCmd += " {flags}"; $hasArgs = $true }}\n            '
+    return cases
 
-    if shell_type == "powershell":
-        func_code = generate_powershell_function()
+def _get_bash_cases():
+    cases = ""
+    for key, files in {
+        "gpu": ["gpu_builder.md", "gpu_optim.md"],
+        "net": ["net_kernel.md"],
+        "ml": ["ml_systems.md"],
+        "soft": ["soft_arch.md"]
+    }.items():
+        paths = [os.path.join(CONTEXT_DIR, f) for f in files]
+        flags = " ".join([f'--read "{p}"' for p in paths])
+        cases += f'"{key}") cmd="$cmd {flags}"; has_args=true ;;\n            '
+    return cases
+
+def install_alias(exe_path):
+    if platform.system() == "Windows":
+        try:
+            profile = subprocess.check_output(["powershell", "-NoProfile", "echo $PROFILE"], text=True).strip()
+            func_code = generate_powershell_function(exe_path)
+        except: return
     else:
-        func_code = generate_bash_function()
+        # Linux/WSL
+        shell = os.environ.get("SHELL", "/bin/bash")
+        profile = os.path.expanduser("~/.zshrc") if "zsh" in shell else os.path.expanduser("~/.bashrc")
+        func_code = generate_bash_function(exe_path)
 
-    # Check if already installed
-    with open(config_path, "r") as f:
-        content = f.read()
-    
-    if "# --- Sys-Workbench Mix ---" in content:
-        print_status("sys-mix function already exists. Please remove it manually to update.", "WARN")
-    else:
-        with open(config_path, "a") as f:
+    if not os.path.exists(os.path.dirname(profile)):
+        os.makedirs(os.path.dirname(profile), exist_ok=True)
+
+    if ask_user(f"Add 'sys-mix' alias to {os.path.basename(profile)}?"):
+        with open(profile, "a") as f:
             f.write("\n" + func_code + "\n")
-        print_status("Injection successful!", "SUCCESS")
-        if shell_type == "powershell":
-             print_status(f"Run '. {config_path}' to refresh.", "INFO")
-        else:
-             print_status(f"Run 'source {config_path}' to refresh.", "INFO")
+        log("Profile updated.", "SUCCESS")
 
 if __name__ == "__main__":
-    print_status(f"Initializing Sys-Workbench at {REPO_ROOT}...", "INFO")
-    install_aider_pipx()
-    install_alias()
-    print_status("Setup Complete. Use 'sys-mix gpu net' to start.", "SUCCESS")
+    print(f"{COLORS['HEADER']}--- Sys-Workbench Clean Install ---{COLORS['END']}")
+    
+    target_py = setup_python_env()
+    install_pipx()
+    install_aider(target_py)
+    
+    exe_path = find_absolute_aider_path()
+    if exe_path:
+        install_alias(exe_path)
+        print(f"\n{COLORS['GREEN']}INSTALLATION COMPLETE.{COLORS['END']}")
+        print("Run this command to refresh your terminal:")
+        if platform.system() == "Windows":
+             print(f"  {COLORS['BOLD']}. $PROFILE{COLORS['END']}")
+        else:
+             print(f"  {COLORS['BOLD']}source ~/.bashrc{COLORS['END']}")
+    else:
+        log("CRITICAL: Aider installed but executable not found.", "ERROR")
