@@ -1,0 +1,21 @@
+# sys-workbench/config/aider.conf.yml
+
+# --- Model Configuration ---
+# Use DeepSeek R1 for reasoning/architecting (high logic)
+architect: deepseek/deepseek-reasoner
+
+# Use DeepSeek V3 for coding/editing (speed/cost)
+model: deepseek/deepseek-chat
+
+# --- Behavior ---
+# Auto-commit changes to git (essential for rollback in systems work)
+auto-commits: true
+
+# Enable auto-linting to catch syntax errors before LLM sees them
+# (Requires flake8/pylint/cppcheck installed in env)
+auto-lint: true
+
+# --- Display ---
+# Dark mode for late-night kernel hacking
+dark-mode: true
+pretty: true
