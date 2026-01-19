@@ -1,21 +1,26 @@
 # sys-workbench/config/aider.conf.yml
 
-# --- Model Configuration ---
-# Use DeepSeek R1 for reasoning/architecting (high logic)
-architect: deepseek/deepseek-reasoner
-
-# Use DeepSeek V3 for coding/editing (speed/cost)
-model: deepseek/deepseek-chat
-
-# --- Behavior ---
-# Auto-commit changes to git (essential for rollback in systems work)
+# --- Safety Configuration ---
+# 1. Git Safety: KEEP THIS TRUE. It creates local checkpoints so you can undo.
 auto-commits: true
 
-# Enable auto-linting to catch syntax errors before LLM sees them
-# (Requires flake8/pylint/cppcheck installed in env)
-auto-lint: true
+# 2. Static Analysis (SAFE): 
+# It's okay to let Aider run 'cppcheck' or 'flake8' automatically. 
+# These tools only READ your code; they don't execute it.
+# (Uncomment the one you need)
+# lint-cmd: "cppcheck --enable=all ." 
 
-# --- Display ---
-# Dark mode for late-night kernel hacking
+# 3. Dynamic Execution (RISKY): 
+# DISABLE this. Do not let Aider run 'make test' or 'pytest' automatically 
+# unless you are inside a Docker container.
+# test-cmd: "make test"  <-- KEEP COMMENTED OUT
+
+# --- Model & Cost ---
+architect: true
+model: deepseek/deepseek-reasoner
+editor-model: deepseek/deepseek-chat
+cache-prompts: true
+max-chat-history-tokens: 20000
+map-tokens: 2048
+stream: true
 dark-mode: true
-pretty: true
